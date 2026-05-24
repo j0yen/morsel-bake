@@ -13,10 +13,58 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::doc_markdown)]
 
+use std::process::Command;
+
+use safetensors::{Dtype, View, serialize_to_file};
+use tempfile::TempDir;
+
+struct Tensor {
+    dtype: Dtype,
+    shape: Vec<usize>,
+    data: Vec<u8>,
+}
+
+impl View for &Tensor {
+    fn dtype(&self) -> Dtype { self.dtype }
+    fn shape(&self) -> &[usize] { &self.shape }
+    fn data(&self) -> std::borrow::Cow<'_, [u8]> { std::borrow::Cow::Borrowed(&self.data) }
+    fn data_len(&self) -> usize { self.data.len() }
+}
+
 #[test]
 fn acceptance_ac5() {
-    // edit-agent: replace this stub with a real assertion. The
-    // panic keeps the test failing until you do, so the loop
-    // sees a real Stage 3 signal.
-    panic!("AC AC5 not yet implemented — see file header");
+    let dir = TempDir::new().unwrap();
+    let st_path = dir.path().join("int8.safetensors");
+    let out_path = dir.path().join("out.rs");
+
+    // i8 tensor with 4 elements.
+    let t = Tensor {
+        dtype: Dtype::I8,
+        shape: vec![4],
+        data: vec![1u8, 2, 3, 4],
+    };
+    let tensors: Vec<(String, Tensor)> = vec![("quant_layer".to_string(), t)];
+    serialize_to_file(tensors.iter().map(|(s, t)| (s.as_str(), t)), None, &st_path).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_morsel-bake");
+    let out = Command::new(bin)
+        .args([
+            "--in", st_path.to_str().unwrap(),
+            "--arch", "x",
+            "--out", out_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "expected exit 5, got {:?}, stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("only f32 supported in Phase 0a"), "stderr missing message:\n{stderr}");
+    assert!(stderr.contains("quant_layer"), "stderr missing tensor name:\n{stderr}");
+    assert!(stderr.contains("I8"), "stderr missing dtype:\n{stderr}");
 }
