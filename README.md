@@ -2,6 +2,24 @@
 
 > morsel is the missing-middle Rust crate for embedded ML — but the load-bearing piece for adoption is the offline `bake` CLI that turns trained weights into Rust source.
 
+## Install
+
+### One-liner
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/j0yen/morsel-bake/main/install.sh | bash
+```
+
+### Manual
+
+```sh
+git clone --depth 1 https://github.com/j0yen/morsel-bake.git
+cd morsel-bake
+./install.sh
+```
+
+Installs the `morsel-bake` binary via `cargo install --path . --locked`. Requires `cargo` / `rustc 1.85+` and `git`. Built binary lands in `~/.cargo/bin/`.
+
 ## Why
 
 morsel is the missing-middle Rust crate for embedded ML — but the load-bearing piece for adoption is the offline `bake` CLI that turns trained weights into Rust source. Without bake, every consumer crate has to hand-write const arrays from numpy dumps. Phase 0a ships only the bake CLI; the runtime nn::Lstm/Conv1d/LogMel primitives are Phase 0b. Carving out bake first means the file format and emission shape are locked before the runtime primitives are designed against them.
