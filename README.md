@@ -1,16 +1,20 @@
 # morsel-bake
 
-> morsel is the missing-middle Rust crate for embedded ML — but the load-bearing piece for adoption is the offline `bake` CLI that turns trained weights into Rust source.
+A CLI that turns a trained model's safetensors file into a standalone Rust source file — one `pub const` array per tensor — so the weights compile straight into a binary with no runtime model load.
+
+## Why it exists
+
+The [`morsel`](https://github.com/j0yen/morsel) approach to tiny neural networks is to bake the trained weights into the consumer crate as `const` arrays. That only works if something writes those arrays. The alternative is to hand-transcribe them from a numpy dump, which is tedious and a fresh chance to flip a sign every time the model retrains.
+
+`morsel-bake` is that something. You train a model wherever you train models, export it to safetensors, and run one command. Out comes a `.rs` file you commit into the consumer crate. The format and emission shape are deliberately fixed first, so a model author can rely on the output before any runtime primitive is built against it.
 
 ## Install
-
-### One-liner
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/j0yen/morsel-bake/main/install.sh | bash
 ```
 
-### Manual
+Or from a clone:
 
 ```sh
 git clone --depth 1 https://github.com/j0yen/morsel-bake.git
@@ -18,47 +22,48 @@ cd morsel-bake
 ./install.sh
 ```
 
-Installs the `morsel-bake` binary via `cargo install --path . --locked`. Requires `cargo` / `rustc 1.85+` and `git`. Built binary lands in `~/.cargo/bin/`.
+`install.sh` runs `cargo install --path . --locked`, so the `morsel-bake` binary lands in `~/.cargo/bin/`. Requires `cargo` / `rustc 1.85+` and `git`. To build without installing, `cargo build --release` puts the binary at `target/release/morsel-bake`.
 
-## Why
-
-morsel is the missing-middle Rust crate for embedded ML — but the load-bearing piece for adoption is the offline `bake` CLI that turns trained weights into Rust source. Without bake, every consumer crate has to hand-write const arrays from numpy dumps. Phase 0a ships only the bake CLI; the runtime nn::Lstm/Conv1d/LogMel primitives are Phase 0b. Carving out bake first means the file format and emission shape are locked before the runtime primitives are designed against them.
-
-## Build
+## First run
 
 ```sh
-cargo build --release
+morsel-bake --in model.safetensors --arch lstm_classifier --out weights.rs
 ```
 
-Produces `target/release/morsel-bake`. Symlink into `~/.local/bin/` if you want it on `$PATH`.
+Reads every tensor in `model.safetensors` and writes `weights.rs`, containing one `pub const` per tensor plus an `ARCH_FINGERPRINT` derived from `--arch`. The output compiles on its own — it pulls in no dependencies, not even `morsel` — so you can drop it into any crate. `--out` will not overwrite an existing file unless you pass `--force`.
 
-## Usage
+```
+Usage: morsel-bake [OPTIONS] --in <PATH> --arch <NAME> --out <PATH>
 
-```sh
-morsel-bake --help
+Options:
+      --in <PATH>    Input safetensors file
+      --arch <NAME>  Architecture name (baked into `ARCH_FINGERPRINT`)
+      --out <PATH>   Output Rust source file
+      --force        Overwrite the output file if it already exists
 ```
 
-## Audience
+## How it works
 
-model author (the author or future-Claude on the author's behalf) running the bake CLI once per trained model, offline, after `safetensors` export. Output is a `weights.rs` file that gets committed into a consumer crate.
+Each tensor becomes a const whose Rust type mirrors its shape: a 1-D tensor emits `[f32; N]`, a matrix `[[f32; N]; M]`, and so on up to rank 4; a scalar emits a bare `f32`. Tensor names that carry `.` or `/` — `weight.ih`, `layer/0/weight` — are sanitized to uppercase Rust identifiers (`WEIGHT_IH`, `LAYER_0_WEIGHT`). Floats are written with enough precision to round-trip bit-identically, so the const you compile is the weight you trained, not a rounded copy.
 
-## Acceptance criteria
+The exit code tells you what went wrong, and the contract is stable enough that tests pin it:
 
-This project was scaffolded from a PRD via the `autobuilder` pipeline. The MUST-level acceptance criteria are:
+| Code | Meaning |
+| --- | --- |
+| 2 | `--in` file does not exist |
+| 4 | two tensor names collide after sanitization |
+| 5 | a tensor's dtype is not f32 (only f32 is supported) |
+| 6 | a tensor's rank exceeds 4 |
+| 7 | `--out` already exists and `--force` was not passed |
+| 1 | other I/O or safetensors parse error |
 
-- **AC1**: `morsel-bake --in <safetensors-file> --arch <name> --out <rust-file>` reads tensors from the safetensors file, emits Rust source containing one `pub const NAME: [[f32; N]; M] = ...;` (or 1-D `[f32; N]`) per tensor, plus `pub const ARCH_F...
-- **AC2**: Const arrays preserve f32 precision exactly — round-tripping (write tensor → safetensors → bake → const → parse from emitted source) yields bit-identical f32 bytes. Use Rust's `{:e}` or `f32::from_bits` style if needed to avoid lossy for...
-- **AC3**: The emitted `.rs` file compiles standalone (no morsel runtime deps). The test writes the output to a tempdir, wraps it in a minimal `Cargo.toml`+`lib.rs`, runs `cargo build`, and asserts success.
-- **AC4**: Tensor names from safetensors that contain `.` or `/` are sanitized to uppercase Rust-identifier-safe names (`weight.ih` → `WEIGHT_IH`, `layer/0/weight` → `LAYER_0_WEIGHT`). Conflicts after sanitization → exit 4 with stderr listing the c...
-- **AC5**: Tensors with dtype other than f32 → exit 5 with stderr listing the offending tensor and its dtype, and the message `only f32 supported in Phase 0a`. (f16/bf16/int8 are Phase 0b with --quant flag.)
-- **AC6**: Tensors with rank > 2 are emitted as Rust nested arrays one dimension deeper per rank (`[[[f32; D2]; D1]; D0]`). Rank-0 (scalar) tensors emit `pub const NAME: f32 = ...;`. Rank > 4 → exit 6 with stderr `rank N exceeds supported max 4`.
-- **AC7**: Non-existent --in file → exit 2 with stderr containing the path and `safetensors file not found`. --out path that already exists → exit 7 unless `--force` is passed (then overwrites).
+## Where it fits
 
-Each AC has a matching integration test under `tests/acceptance_ac<n>.rs`.
+`morsel-bake` is the build-time half of a two-crate pair. [`morsel`](https://github.com/j0yen/morsel) is the runtime half — the scalar inference primitives the baked weights feed. Train elsewhere, bake the weights here, link `morsel`, ship one binary.
 
-## Provenance
+## Status
 
-Built via the [`autobuilder`](https://github.com/j0yen/autobuilder) pipeline (PRD intake -> intent-card -> scaffold -> iterate-and-prove). Originally consolidated as a subdir of the [`wintermute`](https://github.com/j0yen/wintermute) monorepo; this standalone repo is a fresh-init snapshot for easier consumption and distribution.
+v0.1. Inputs are f32 safetensors only — f16, bf16, and int8 quantization are not handled. Tensors of rank 5 or higher are rejected.
 
 ## License
 
